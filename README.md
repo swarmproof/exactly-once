@@ -22,14 +22,16 @@ from exactly_once import once, Store
 
 store = Store.sqlite("effects.db")
 
-@once(store, key=lambda customer, amount: f"charge:{customer}:{amount}")
-def charge_card(customer, amount):
-    return stripe.charge(customer, amount)   # runs at most once, ever
+@once(store, key=lambda order, **_: f"charge:{order.id}")
+def charge_card(order):
+    return stripe.charge(order.customer, order.amount)   # runs at most once, ever
 
 with once(store, key="send-welcome:user-4471") as guard:
     if guard.fresh:
         send_email(...)                       # skipped on any replay
 ```
+
+> ⚠️ Key on stable business identity (`order_id`), never on a mutable value like amount — two distinct $50 charges must not collapse into one.
 
 ## The guarantee (honestly scoped)
 
