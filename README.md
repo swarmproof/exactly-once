@@ -37,7 +37,7 @@ Classic idempotency-key pattern adapted for agents: compute a stable key → ato
 
 Pluggable stores: memory · SQLite · Redis · Postgres. Onchain adapter dedupes by (nonce, calldata-hash). See [`SPEC.md`](./SPEC.md) and [`ROADMAP.md`](./ROADMAP.md).
 
-## Part of the Agent Reliability toolkit
+## Part of the Swarm Proof toolkit
 
 *Trust infrastructure for the agent economy — seven projects, one thesis.*
 
