@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software or dataset, please cite it as below."
+title: "exactly-once"
+abstract: "Idempotency middleware for agent side-effects. Part of the Agent Reliability toolkit."
+authors:
+  - family-names: Boudoukha
+    given-names: Maroua
+repository-code: "https://github.com/AgentReliability/exactly-once"
+url: "https://github.com/AgentReliability/exactly-once"
+license: MIT
+type: software
+keywords:
+  - ai-agents
+  - agent-reliability
+  - llm
+  - mcp
