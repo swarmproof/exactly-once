@@ -5,8 +5,8 @@ abstract: "Idempotency middleware for agent side-effects. Part of the Agent Reli
 authors:
   - family-names: Boudoukha
     given-names: Maroua
-repository-code: "https://github.com/AgentReliability/exactly-once"
-url: "https://github.com/AgentReliability/exactly-once"
+repository-code: "https://github.com/swarmproof/exactly-once"
+url: "https://github.com/swarmproof/exactly-once"
 license: MIT
 type: software
 keywords:

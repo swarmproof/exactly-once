@@ -1,6 +1,6 @@
 # Contributing to exactly-once
 
-Thanks for helping build **exactly-once** — part of the [Agent Reliability toolkit](https://github.com/AgentReliability).
+Thanks for helping build **exactly-once** — part of the [Agent Reliability toolkit](https://github.com/swarmproof).
 
 ## Ways to contribute
 - **Good first issues** — look for the `good-first-issue` label. A few are seeded to get you started.
