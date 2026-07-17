@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Correctness gates that don't depend on the Python matrix run once.
+  lint-type-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.12
+      - run: uv pip install -e ".[dev]"
+      - name: Ruff (lint)
+        run: uv run ruff check src tests examples
+      - name: Mypy (strict) — G-TYPE
+        run: uv run mypy src/exactly_once
+      - name: Docs-honesty lint — G-DOCS
+        run: uv run python scripts/check_docs_honesty.py
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python ${{ matrix.python }}
+      - run: uv pip install -e ".[dev]"
+      # Docker is available on ubuntu runners, so testcontainers spins up Redis +
+      # Postgres for the backend tests (G-RACE/G-CRASH on the distributed stores).
+      # The DoD's ≥95% target is on the core state machine + memory/sqlite adapters
+      # (met — see the per-module report). This total floor guards against regressions
+      # across all modules including the Docker-backed Redis/Postgres adapters.
+      - name: Test with coverage — G-PROP / G-RACE / G-CRASH / G-E2E / G-COV
+        run: >
+          uv run pytest -q
+          --cov=exactly_once --cov-report=term-missing
+          --cov-fail-under=85

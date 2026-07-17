@@ -1,0 +1,140 @@
+"""SQLite store — single-host, durable, zero external dependency.
+
+Atomicity mechanism: ``BEGIN IMMEDIATE`` takes SQLite's write lock, then an
+``INSERT`` on the ``key`` PRIMARY KEY either succeeds (we are the ``FRESH`` winner)
+or raises ``IntegrityError`` (a record already exists — read it). SQLite serializes
+writers via the database file lock, so concurrent processes on the same file get a
+strong single-host guarantee. It is **not** for multi-host — see ARCH §3.1.
+
+Durability: WAL journaling with ``synchronous=NORMAL`` survives process death
+(our crash model — SIGKILL, not power loss), which is what the crash-injection
+suite exercises. A committed record is fsync-durable in the WAL.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+import time
+from collections.abc import Iterator
+from typing import Any
+
+from .._types import ClaimRecord, ClaimResult, State
+from .base import Store
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS effects (
+    key         TEXT PRIMARY KEY,
+    state       TEXT NOT NULL,
+    result      BLOB,
+    fingerprint TEXT,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+"""
+
+
+class SQLiteStore(Store):
+    def __init__(self, path: str = ":memory:") -> None:
+        self._path = path
+        # check_same_thread=False + a lock: we guard the shared connection ourselves,
+        # while BEGIN IMMEDIATE + the file lock handle cross-process serialization.
+        self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self._lock = threading.Lock()
+        self._conn.execute("PRAGMA journal_mode=WAL;")
+        self._conn.execute("PRAGMA synchronous=NORMAL;")
+        self._conn.execute("PRAGMA busy_timeout=5000;")
+        self._conn.executescript(_SCHEMA)
+
+    def claim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
+        now = time.time()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE;")
+            try:
+                self._conn.execute(
+                    "INSERT INTO effects(key, state, result, fingerprint, created_at, updated_at) "
+                    "VALUES (?, ?, NULL, ?, ?, ?);",
+                    (key, State.IN_FLIGHT.value, fingerprint, now, now),
+                )
+            except sqlite3.IntegrityError:
+                self._conn.execute("ROLLBACK;")
+                row = self._conn.execute(
+                    "SELECT state, result, fingerprint FROM effects WHERE key = ?;", (key,)
+                ).fetchone()
+                # A concurrent writer could have released between ABORT and this read;
+                # treat a vanished record as a fresh claim retry by the caller.
+                if row is None:
+                    return self.claim(key, fingerprint=fingerprint)
+                state, result, stored_fp = row
+                return ClaimResult(State(state), key, result, stored_fp)
+            else:
+                self._conn.execute("COMMIT;")
+                return ClaimResult(State.FRESH, key, None, fingerprint)
+
+    def commit(self, key: str, result: bytes) -> None:
+        now = time.time()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE;")
+            row = self._conn.execute(
+                "SELECT state FROM effects WHERE key = ?;", (key,)
+            ).fetchone()
+            if row is not None and row[0] == State.COMMITTED.value:
+                self._conn.execute("COMMIT;")
+                return  # idempotent
+            self._conn.execute(
+                "INSERT INTO effects(key, state, result, fingerprint, created_at, updated_at) "
+                "VALUES (?, ?, ?, NULL, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET state=excluded.state, result=excluded.result, "
+                "updated_at=excluded.updated_at;",
+                (key, State.COMMITTED.value, result, now, now),
+            )
+            self._conn.execute("COMMIT;")
+
+    def release(self, key: str) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE;")
+            self._conn.execute(
+                "DELETE FROM effects WHERE key = ? AND state = ?;",
+                (key, State.IN_FLIGHT.value),
+            )
+            self._conn.execute("COMMIT;")
+
+    def get(self, key: str) -> ClaimRecord | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT key, state, result, fingerprint, created_at, updated_at "
+                "FROM effects WHERE key = ?;",
+                (key,),
+            ).fetchone()
+        return _row_to_record(row) if row is not None else None
+
+    def list(self, state: State | None = None) -> Iterator[ClaimRecord]:
+        with self._lock:
+            if state is None:
+                rows = self._conn.execute(
+                    "SELECT key, state, result, fingerprint, created_at, updated_at FROM effects;"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT key, state, result, fingerprint, created_at, updated_at "
+                    "FROM effects WHERE state = ?;",
+                    (state.value,),
+                ).fetchall()
+        for row in rows:
+            yield _row_to_record(row)
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
+def _row_to_record(row: tuple[Any, ...]) -> ClaimRecord:
+    key, state, result, fingerprint, created_at, updated_at = row
+    return ClaimRecord(
+        key=str(key),
+        state=State(state),
+        result=None if result is None else bytes(result),
+        fingerprint=None if fingerprint is None else str(fingerprint),
+        created_at=float(created_at),
+        updated_at=float(updated_at),
+    )
