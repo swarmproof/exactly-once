@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "exactly-once"
+version = "0.1.0"
+description = "Idempotency middleware for agent side-effects — a guarded effect fires at most once per key, even across retries, crashes, and replays."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Maroua Boudoukha" }]
+keywords = ["ai-agents", "agent-reliability", "idempotency", "exactly-once", "llm", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+# Core has ZERO required heavy deps (NFR-4). Everything below is an optional extra.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/swarmproof/exactly-once"
+Repository = "https://github.com/swarmproof/exactly-once"
+Issues = "https://github.com/swarmproof/exactly-once/issues"
+
+[project.optional-dependencies]
+redis = ["redis>=5.0"]
+postgres = ["psycopg[binary]>=3.2"]
+onchain = ["web3>=6.0"]  # v0.2
+dev = [
+    "pytest>=8.4",
+    "pytest-asyncio>=1.0",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.100",
+    "testcontainers[postgres,redis]>=4.0",
+    "mypy>=1.10",
+    "ruff>=0.5",
+    "redis>=5.0",
+    "psycopg[binary]>=3.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/exactly_once"]
+
+[tool.pytest.ini_options]
+# pytest-asyncio in "auto" mode: any `async def test_*` is collected without a marker.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "redis: tests that require a Redis backend (testcontainers)",
+    "postgres: tests that require a Postgres backend (testcontainers)",
+    "slow: long-running property/race sweeps",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/exactly_once"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# Optional backends may be absent in a given environment.
+module = ["redis.*", "psycopg.*", "web3.*", "testcontainers.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "RUF"]
+# Keep __all__ grouped by role (core / types / policies / errors) rather than sorted.
+ignore = ["RUF022"]
+
+[tool.coverage.run]
+branch = true
+source = ["exactly_once"]
