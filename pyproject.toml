@@ -8,13 +8,14 @@ version = "0.1.0"
 description = "Idempotency middleware for agent side-effects — a guarded effect fires at most once per key, even across retries, crashes, and replays."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Maroua Boudoukha" }]
 keywords = ["ai-agents", "agent-reliability", "idempotency", "exactly-once", "llm", "mcp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -28,11 +29,13 @@ dependencies = []
 Homepage = "https://github.com/swarmproof/exactly-once"
 Repository = "https://github.com/swarmproof/exactly-once"
 Issues = "https://github.com/swarmproof/exactly-once/issues"
+Documentation = "https://github.com/swarmproof/exactly-once/blob/main/docs/ARCHITECTURE.md"
+Changelog = "https://github.com/swarmproof/exactly-once/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 redis = ["redis>=5.0"]
 postgres = ["psycopg[binary]>=3.2"]
-onchain = ["web3>=6.0"]  # v0.2
+# NOTE: the onchain adapter is v0.2 — no `[onchain]` extra is published until it exists.
 dev = [
     "pytest>=8.4",
     "pytest-asyncio>=1.0",
