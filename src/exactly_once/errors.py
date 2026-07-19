@@ -52,6 +52,16 @@ class QuarantinedError(ExactlyOnceError):
         )
 
 
+class ResultTooLargeError(ExactlyOnceError):
+    """A committed result exceeded the codec's size ceiling (REQ-S6).
+
+    Idempotency ledgers are for small results (an id, a status) — the documented
+    pattern is to *store a reference, not the payload*. The ceiling guards the store
+    against unbounded growth from an accidental large result; raise it deliberately
+    via ``JSONCodec(max_bytes=...)`` if you really mean to store something big.
+    """
+
+
 class StoreUnavailableError(ExactlyOnceError):
     """The store could not be reached (ADR-006, REQ-S7).
 

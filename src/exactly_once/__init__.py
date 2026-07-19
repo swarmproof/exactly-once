@@ -25,6 +25,7 @@ from .errors import (
     ExactlyOnceError,
     KeyReuseError,
     QuarantinedError,
+    ResultTooLargeError,
     StoreUnavailableError,
     UnstableKeyError,
 )
@@ -67,6 +68,7 @@ __all__ = [
     "UnstableKeyError",
     "KeyReuseError",
     "QuarantinedError",
+    "ResultTooLargeError",
     "StoreUnavailableError",
     "__version__",
 ]
