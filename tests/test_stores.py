@@ -49,6 +49,23 @@ def test_release_never_undoes_a_commit(store: Store) -> None:
     assert store.claim("k1").state is State.COMMITTED
 
 
+def test_claim_returns_ownership_token(store: Store) -> None:
+    r = store.claim("k1")
+    assert r.state is State.FRESH
+    assert r.token  # a fresh claim stamps a token
+    assert store.claim("k1").token == r.token  # an IN_FLIGHT observation returns the same token
+
+
+def test_release_with_wrong_token_is_a_noop(store: Store) -> None:
+    """Compare-and-delete: only the observer of a claim's token may retire it — the
+    ownership guarantee that stops a reconciler from deleting a peer's re-claim."""
+    r = store.claim("k1")
+    store.release("k1", token="not-the-token")
+    assert store.claim("k1").state is State.IN_FLIGHT  # NOT deleted — wrong token
+    store.release("k1", token=r.token)
+    assert store.claim("k1").state is State.FRESH  # correct token retired it
+
+
 def test_fingerprint_is_stored_and_returned(store: Store) -> None:
     store.claim("k1", fingerprint="fp-abc")
     assert store.claim("k1").fingerprint == "fp-abc"
