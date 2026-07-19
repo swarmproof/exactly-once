@@ -4,10 +4,9 @@
 
 > The primitive agent frameworks forgot. Wrap any tool call that must never fire twice — a payment, an email, an onchain transaction — and **exactly-once** guarantees it runs a single time, even across retries, crashes, and replays.
 
-<!-- TODO: demo GIF — an agent crashing mid-payment, resuming, and NOT double-charging -->
-<p align="center"><em>▶ demo GIF coming — agent crashes mid-payment, resumes, does not double-charge (with vs without)</em></p>
+<p align="center"><em>See it prevent a double-charge in one command:</em><br><code>python examples/crash_mid_payment.py</code> — an agent crashes mid-payment, resumes, and does not double-charge (with vs without).</p>
 
-> **Status:** 🚧 v0.1 in progress. Zero-LLM, tiny surface, drop-in.
+> **v0.1** — zero-LLM, tiny surface, drop-in.
 
 ---
 
@@ -19,7 +18,7 @@ Agents retry. They crash and resume. They get replayed during debugging. Every o
 
 ```bash
 pip install exactly-once            # core, zero heavy deps
-pip install "exactly-once[redis]"   # + Redis store   (also: [postgres], [onchain])
+pip install "exactly-once[redis]"   # + Redis store   (also: [postgres])
 ```
 
 ## Quickstart
@@ -57,7 +56,7 @@ More runnable examples in [`examples/`](./examples/).
 
 Classic idempotency-key pattern adapted for agents: compute a stable key → atomically check-and-claim → if **committed**, return the stored result without re-running; if **in-flight**, block/deny per policy; if new, run and commit. On a crash mid-effect the key is left in-flight and **quarantined** — a half-completed payment must never silently re-fire. Single-writer semantics are strong; multi-writer needs a real transactional store (documented, not overpromised).
 
-Pluggable stores: memory · SQLite · Redis · Postgres. Onchain adapter dedupes by (nonce, calldata-hash). See [`SPEC.md`](./SPEC.md) and [`ROADMAP.md`](./ROADMAP.md).
+Pluggable stores: memory · SQLite · Redis · Postgres. An onchain adapter (dedupe by nonce + calldata-hash) is planned for v0.2. See [`SPEC.md`](./SPEC.md) and [`ROADMAP.md`](./ROADMAP.md).
 
 ### What it guarantees — and what it doesn't
 
