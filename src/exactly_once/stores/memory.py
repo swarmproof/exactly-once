@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from dataclasses import replace
 
@@ -27,6 +28,7 @@ class MemoryStore(Store):
             row = self._data.get(key)
             if row is None:
                 now = time.time()
+                token = uuid.uuid4().hex
                 self._data[key] = ClaimRecord(
                     key=key,
                     state=State.IN_FLIGHT,
@@ -34,9 +36,10 @@ class MemoryStore(Store):
                     fingerprint=fingerprint,
                     created_at=now,
                     updated_at=now,
+                    token=token,
                 )
-                return ClaimResult(State.FRESH, key, None, fingerprint)
-            return ClaimResult(row.state, key, row.result, row.fingerprint)
+                return ClaimResult(State.FRESH, key, None, fingerprint, token)
+            return ClaimResult(row.state, key, row.result, row.fingerprint, row.token)
 
     def commit(self, key: str, result: bytes) -> None:
         with self._lock:
@@ -50,11 +53,14 @@ class MemoryStore(Store):
                 return  # idempotent
             self._data[key] = replace(row, state=State.COMMITTED, result=result, updated_at=now)
 
-    def release(self, key: str) -> None:
+    def release(self, key: str, token: str | None = None) -> None:
         with self._lock:
             row = self._data.get(key)
             # release is IN_FLIGHT -> FRESH only; never undo a COMMITTED effect.
+            # With a token, only the observer of that exact claim may retire it.
             if row is not None and row.state is State.IN_FLIGHT:
+                if token is not None and row.token != token:
+                    return  # a peer has re-claimed since we observed it — no-op
                 del self._data[key]
 
     def get(self, key: str) -> ClaimRecord | None:

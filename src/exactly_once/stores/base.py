@@ -53,8 +53,14 @@ class Store(ABC):
         """``IN_FLIGHT → COMMITTED``, storing the serialized result. Idempotent."""
 
     @abstractmethod
-    def release(self, key: str) -> None:
-        """``IN_FLIGHT → FRESH`` (delete the record). Legal only pre-effect (§5)."""
+    def release(self, key: str, token: str | None = None) -> None:
+        """``IN_FLIGHT → FRESH`` (delete the record). Legal only pre-effect (§5).
+
+        If ``token`` is given this is a **compare-and-delete**: the record is removed
+        only if it is ``IN_FLIGHT`` *and* still carries that ownership token, so a
+        concurrent reconciler cannot delete a claim a peer has already re-claimed.
+        With ``token=None`` it deletes any ``IN_FLIGHT`` record (internal/pre-effect).
+        """
 
     # --- ledger (read-only) ------------------------------------------------
 
@@ -77,8 +83,8 @@ class Store(ABC):
     async def acommit(self, key: str, result: bytes) -> None:
         await asyncio.to_thread(self.commit, key, result)
 
-    async def arelease(self, key: str) -> None:
-        await asyncio.to_thread(self.release, key)
+    async def arelease(self, key: str, token: str | None = None) -> None:
+        await asyncio.to_thread(self.release, key, token)
 
     async def aget(self, key: str) -> ClaimRecord | None:
         return await asyncio.to_thread(self.get, key)

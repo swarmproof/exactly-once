@@ -39,6 +39,11 @@ class ClaimResult:
     key: str
     result: bytes | None = None
     fingerprint: str | None = None
+    token: str | None = None
+    """Ownership / fencing token stamped when the record was created. A reconciler
+    passes it to :meth:`Store.release` so release is a compare-and-delete: only the
+    observer of *this* claim can retire it, never a concurrent reconciler that has
+    since re-claimed the key."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,3 +61,4 @@ class ClaimRecord:
     fingerprint: str | None = None
     created_at: float | None = None
     updated_at: float | None = None
+    token: str | None = None
