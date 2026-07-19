@@ -70,8 +70,15 @@ def _derive_key(
 ) -> str:
     qualname = getattr(func, "__qualname__", None) or getattr(func, "__name__", "<anon>")
     module = getattr(func, "__module__", "")
+    # Lambdas all share the qualname "<lambda>", so two distinct lambdas with equal
+    # args would derive the same key and silently share a result. Disambiguate them
+    # by source location. (Named functions keep stable, position-independent keys.)
+    location = ""
+    code = getattr(func, "__code__", None)
+    if code is not None and getattr(func, "__name__", "") == "<lambda>":
+        location = f"\0{code.co_filename}:{code.co_firstlineno}"
     normalized = _normalize_args(args, kwargs, codec)
-    digest = hashlib.sha256(f"{module}.{qualname}\0{normalized}".encode()).hexdigest()
+    digest = hashlib.sha256(f"{module}.{qualname}{location}\0{normalized}".encode()).hexdigest()
     return f"auto:{qualname}:{digest[:32]}"
 
 
