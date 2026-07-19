@@ -90,7 +90,24 @@ class once:
         self._namespace = namespace
         self._codec = codec
         self._on_store_down = on_store_down
-        self._cm_guard: _Guard | None = None
+        # Per-block guard state lives in a ContextVar stack, NOT a shared instance
+        # attribute — so one `once(...)` object entered from multiple threads or
+        # asyncio tasks never commits the wrong block's result. The stack handles
+        # nesting the same object within a single context.
+        self._cm_stack: contextvars.ContextVar[tuple[_Guard, ...]] = contextvars.ContextVar(
+            f"exactly_once_cm_{id(self)}", default=()
+        )
+
+    def _push_guard(self, guard: _Guard) -> _Guard:
+        self._cm_stack.set((*self._cm_stack.get(), guard))
+        return guard
+
+    def _pop_guard(self) -> _Guard | None:
+        stack = self._cm_stack.get()
+        if not stack:
+            return None
+        self._cm_stack.set(stack[:-1])
+        return stack[-1]
 
     # ------------------------------------------------------------------ #
     # decorator form
@@ -124,8 +141,7 @@ class once:
         fp = self._fp((), {})
         claim = self._claim_or_open(key, fp, is_async=False)
         if claim is None:  # store down, fail-open
-            self._cm_guard = _Guard(key, fresh=True, unguarded=True)
-            return self._cm_guard
+            return self._push_guard(_Guard(key, fresh=True, unguarded=True))
         self._check_fingerprint(claim, fp)
 
         if claim.state is State.FRESH:
@@ -134,12 +150,10 @@ class once:
             guard = _Guard(key, fresh=False, result=self._decode(claim.result))
         else:
             guard = self._resolve_in_flight_cm(key, fp, claim, is_async=False)
-        self._cm_guard = guard
-        return guard
+        return self._push_guard(guard)
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> Literal[False]:
-        guard = self._cm_guard
-        self._cm_guard = None
+        guard = self._pop_guard()
         if guard is None or guard._unguarded or not guard.fresh:
             return False
         if exc_type is None:
@@ -156,8 +170,7 @@ class once:
         fp = self._fp((), {})
         claim = await self._aclaim_or_open(key, fp)
         if claim is None:
-            self._cm_guard = _Guard(key, fresh=True, unguarded=True)
-            return self._cm_guard
+            return self._push_guard(_Guard(key, fresh=True, unguarded=True))
         self._check_fingerprint(claim, fp)
 
         if claim.state is State.FRESH:
@@ -166,12 +179,10 @@ class once:
             guard = _Guard(key, fresh=False, result=self._decode(claim.result))
         else:
             guard = await self._aresolve_in_flight_cm(key, fp, claim)
-        self._cm_guard = guard
-        return guard
+        return self._push_guard(guard)
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> Literal[False]:
-        guard = self._cm_guard
-        self._cm_guard = None
+        guard = self._pop_guard()
         if guard is None or guard._unguarded or not guard.fresh:
             return False
         if exc_type is None:
