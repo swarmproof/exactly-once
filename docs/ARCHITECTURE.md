@@ -301,6 +301,7 @@ Semantics are identical to Python; the store contract is the shared cross-langua
 - **L-5. It does not make a non-idempotent provider idempotent by itself.** It controls the call site, not the provider. Compose with the provider's idempotency key for end-to-end safety.
 - **L-6. It provides no cross-store or cross-key transaction.** One key → one store → one effect. Guarding two independent irreversible effects in one block is unsupported and unsafe.
 - **L-7. Expiry is a correctness knob.** An expired committed key is a re-fireable effect; an auto-expiring `IN_FLIGHT` re-opens the double-fire window. Defaults favor safety (no `IN_FLIGHT` auto-expiry for irreversible effects).
+- **L-8. The release-based reconciliation policies are single-reconciler.** `check_then_decide` and `auto_retry` are **crash-recovery** tools: they assume the worker that left a key `IN_FLIGHT` is *gone*. An ownership/fencing token on every claim makes `release` a compare-and-delete, so a stale reconciler can never delete a newer claim — but if *multiple live workers* reconcile the same key at once, a "not committed *yet*" verdict cannot distinguish a slow live worker from a dead one, and more than one may run. Telling them apart needs a lease/heartbeat (v0.2). The concurrency-safe policies are `quarantine` (default) and `wait`.
 
 ---
 
