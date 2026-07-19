@@ -16,10 +16,12 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from typing import Any
 
 from .._types import ClaimRecord, ClaimResult, State
+from ..errors import StoreUnavailableError
 from .base import Store
 
 _SCHEMA = """
@@ -29,9 +31,17 @@ CREATE TABLE IF NOT EXISTS effects (
     result      BLOB,
     fingerprint TEXT,
     created_at  REAL NOT NULL,
-    updated_at  REAL NOT NULL
+    updated_at  REAL NOT NULL,
+    token       TEXT
 );
 """
+
+_COLS = "key, state, result, fingerprint, created_at, updated_at, token"
+
+# A vanished-record race (INSERT conflicts, then a concurrent process releases the
+# row before our SELECT reads it) is retried a bounded number of times — never via
+# recursion, which would re-enter the non-reentrant lock and deadlock.
+_MAX_CLAIM_ATTEMPTS = 100
 
 
 class SQLiteStore(Store):
@@ -49,27 +59,31 @@ class SQLiteStore(Store):
     def claim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
         now = time.time()
         with self._lock:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            try:
-                self._conn.execute(
-                    "INSERT INTO effects(key, state, result, fingerprint, created_at, updated_at) "
-                    "VALUES (?, ?, NULL, ?, ?, ?);",
-                    (key, State.IN_FLIGHT.value, fingerprint, now, now),
-                )
-            except sqlite3.IntegrityError:
-                self._conn.execute("ROLLBACK;")
-                row = self._conn.execute(
-                    "SELECT state, result, fingerprint FROM effects WHERE key = ?;", (key,)
-                ).fetchone()
-                # A concurrent writer could have released between ABORT and this read;
-                # treat a vanished record as a fresh claim retry by the caller.
-                if row is None:
-                    return self.claim(key, fingerprint=fingerprint)
-                state, result, stored_fp = row
-                return ClaimResult(State(state), key, result, stored_fp)
-            else:
-                self._conn.execute("COMMIT;")
-                return ClaimResult(State.FRESH, key, None, fingerprint)
+            for _attempt in range(_MAX_CLAIM_ATTEMPTS):
+                token = uuid.uuid4().hex
+                self._conn.execute("BEGIN IMMEDIATE;")
+                try:
+                    self._conn.execute(
+                        f"INSERT INTO effects({_COLS}) VALUES (?, ?, NULL, ?, ?, ?, ?);",
+                        (key, State.IN_FLIGHT.value, fingerprint, now, now, token),
+                    )
+                except sqlite3.IntegrityError:
+                    self._conn.execute("ROLLBACK;")
+                    row = self._conn.execute(
+                        "SELECT state, result, fingerprint, token FROM effects WHERE key = ?;",
+                        (key,),
+                    ).fetchone()
+                    if row is None:
+                        continue  # vanished between our conflict and read — retry (no recursion)
+                    state, result, stored_fp, stored_token = row
+                    return ClaimResult(State(state), key, result, stored_fp, stored_token)
+                else:
+                    self._conn.execute("COMMIT;")
+                    return ClaimResult(State.FRESH, key, None, fingerprint, token)
+            raise StoreUnavailableError(
+                f"claim for {key!r} did not converge after {_MAX_CLAIM_ATTEMPTS} attempts "
+                "under contention; failing closed (effect not run)."
+            )
 
     def commit(self, key: str, result: bytes) -> None:
         now = time.time()
@@ -82,43 +96,42 @@ class SQLiteStore(Store):
                 self._conn.execute("COMMIT;")
                 return  # idempotent
             self._conn.execute(
-                "INSERT INTO effects(key, state, result, fingerprint, created_at, updated_at) "
-                "VALUES (?, ?, ?, NULL, ?, ?) "
+                f"INSERT INTO effects({_COLS}) VALUES (?, ?, ?, NULL, ?, ?, NULL) "
                 "ON CONFLICT(key) DO UPDATE SET state=excluded.state, result=excluded.result, "
                 "updated_at=excluded.updated_at;",
                 (key, State.COMMITTED.value, result, now, now),
             )
             self._conn.execute("COMMIT;")
 
-    def release(self, key: str) -> None:
+    def release(self, key: str, token: str | None = None) -> None:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE;")
-            self._conn.execute(
-                "DELETE FROM effects WHERE key = ? AND state = ?;",
-                (key, State.IN_FLIGHT.value),
-            )
+            if token is None:
+                self._conn.execute(
+                    "DELETE FROM effects WHERE key = ? AND state = ?;",
+                    (key, State.IN_FLIGHT.value),
+                )
+            else:
+                self._conn.execute(
+                    "DELETE FROM effects WHERE key = ? AND state = ? AND token = ?;",
+                    (key, State.IN_FLIGHT.value, token),
+                )
             self._conn.execute("COMMIT;")
 
     def get(self, key: str) -> ClaimRecord | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT key, state, result, fingerprint, created_at, updated_at "
-                "FROM effects WHERE key = ?;",
-                (key,),
+                f"SELECT {_COLS} FROM effects WHERE key = ?;", (key,)
             ).fetchone()
         return _row_to_record(row) if row is not None else None
 
     def list(self, state: State | None = None) -> Iterator[ClaimRecord]:
         with self._lock:
             if state is None:
-                rows = self._conn.execute(
-                    "SELECT key, state, result, fingerprint, created_at, updated_at FROM effects;"
-                ).fetchall()
+                rows = self._conn.execute(f"SELECT {_COLS} FROM effects;").fetchall()
             else:
                 rows = self._conn.execute(
-                    "SELECT key, state, result, fingerprint, created_at, updated_at "
-                    "FROM effects WHERE state = ?;",
-                    (state.value,),
+                    f"SELECT {_COLS} FROM effects WHERE state = ?;", (state.value,)
                 ).fetchall()
         for row in rows:
             yield _row_to_record(row)
@@ -129,7 +142,7 @@ class SQLiteStore(Store):
 
 
 def _row_to_record(row: tuple[Any, ...]) -> ClaimRecord:
-    key, state, result, fingerprint, created_at, updated_at = row
+    key, state, result, fingerprint, created_at, updated_at, token = row
     return ClaimRecord(
         key=str(key),
         state=State(state),
@@ -137,4 +150,5 @@ def _row_to_record(row: tuple[Any, ...]) -> ClaimRecord:
         fingerprint=None if fingerprint is None else str(fingerprint),
         created_at=float(created_at),
         updated_at=float(updated_at),
+        token=None if token is None else str(token),
     )

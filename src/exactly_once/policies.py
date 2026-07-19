@@ -122,20 +122,25 @@ class Fail(Policy):
 class AutoRetry(Policy):
     """Release an orphaned key and re-run the effect (REQ-R3).
 
-    ⚠️ This re-opens the double-fire window and is the AWS-Powertools-style
-    delete-and-rerun behavior this library rejects *by default*. Use it **only** for
-    genuinely idempotent, reversible effects (e.g. an email you'd tolerate twice),
-    never for payments or onchain transactions.
+    ⚠️ Two warnings. (1) This re-opens the double-fire window and is the
+    AWS-Powertools-style delete-and-rerun behavior this library rejects *by
+    default*; use it **only** for genuinely idempotent, reversible effects (an email
+    you'd tolerate twice), never for payments or onchain transactions. (2) It is a
+    **single-reconciler / crash-recovery** policy: it assumes the worker that left
+    the key ``IN_FLIGHT`` is *gone*, not still running. The ownership token stops a
+    stale reconciler from deleting a newer claim, but under concurrent reconcilers it
+    can still double-fire. For the concurrency case use :class:`Quarantine` (default)
+    or :class:`Wait`.
     """
 
     def resolve(self, key: str, store: _Store, claim: ClaimResult, codec: Codec) -> Directive:
-        store.release(key)
+        store.release(key, claim.token)
         return Directive(Action.RUN)
 
     async def aresolve(
         self, key: str, store: _Store, claim: ClaimResult, codec: Codec
     ) -> Directive:
-        await store.arelease(key)
+        await store.arelease(key, claim.token)
         return Directive(Action.RUN)
 
 
@@ -151,6 +156,14 @@ class CheckThenDecide(Policy):
     * ``UNKNOWN`` → quarantine (we still cannot tell; refuse to guess).
 
     The prober may be sync or async.
+
+    ⚠️ **Single-reconciler / crash-recovery policy.** Safe when one worker reconciles
+    an orphan left by a *crashed* (gone) worker — the flagship crash-mid-payment
+    case. It is **not** concurrency-safe: if several live workers reconcile the same
+    key at once, a ``NOT_COMMITTED`` verdict means "not committed *yet*," not "no one
+    is running it," so more than one may run. Distinguishing a slow live worker from
+    a dead one needs a lease/heartbeat (v0.2). For concurrent workers on one key, use
+    :class:`Quarantine` (default) or :class:`Wait`.
     """
 
     def __init__(self, prober: Callable[[str], ProbeResult | Any]) -> None:
@@ -174,7 +187,7 @@ class CheckThenDecide(Policy):
         if directive.action is Action.REPLAY and directive.result is not None:
             store.commit(key, directive.result)
         elif directive.action is Action.RUN:
-            store.release(key)
+            store.release(key, claim.token)
         return directive
 
     async def aresolve(
@@ -187,7 +200,7 @@ class CheckThenDecide(Policy):
         if directive.action is Action.REPLAY and directive.result is not None:
             await store.acommit(key, directive.result)
         elif directive.action is Action.RUN:
-            await store.arelease(key)
+            await store.arelease(key, claim.token)
         return directive
 
 

@@ -15,6 +15,7 @@ Requires the ``redis`` extra: ``pip install "exactly-once[redis]"``.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -26,13 +27,14 @@ from .base import Store
 
 _CLAIM_LUA = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
-    redis.call('HSET', KEYS[1], 'state', 'in_flight',
-               'fingerprint', ARGV[1], 'created_at', ARGV[2], 'updated_at', ARGV[2])
-    return {'fresh', '', ARGV[1]}
+    redis.call('HSET', KEYS[1], 'state', 'in_flight', 'fingerprint', ARGV[1],
+               'created_at', ARGV[2], 'updated_at', ARGV[2], 'token', ARGV[3])
+    return {'fresh', '', ARGV[1], ARGV[3]}
 end
 local result = redis.call('HGET', KEYS[1], 'result')
 return {redis.call('HGET', KEYS[1], 'state'), result or '',
-        redis.call('HGET', KEYS[1], 'fingerprint') or ''}
+        redis.call('HGET', KEYS[1], 'fingerprint') or '',
+        redis.call('HGET', KEYS[1], 'token') or ''}
 """
 
 _COMMIT_LUA = """
@@ -42,9 +44,12 @@ if tonumber(ARGV[3]) > 0 then redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3])) e
 return 1
 """
 
+# ARGV[1] is the ownership token, or '' for an unconditional (pre-effect) release.
 _RELEASE_LUA = """
 if redis.call('HGET', KEYS[1], 'state') == 'in_flight' then
-    redis.call('DEL', KEYS[1]); return 1
+    if ARGV[1] == '' or redis.call('HGET', KEYS[1], 'token') == ARGV[1] then
+        redis.call('DEL', KEYS[1]); return 1
+    end
 end
 return 0
 """
@@ -101,13 +106,14 @@ class RedisStore(Store):
     # --- sync ---
 
     def claim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
+        token = uuid.uuid4().hex
         try:
-            state, result, fp = self._claim_s(
-                keys=[self._k(key)], args=[fingerprint or "", self._now()]
+            state, result, fp, tok = self._claim_s(
+                keys=[self._k(key)], args=[fingerprint or "", self._now(), token]
             )
         except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
             raise StoreUnavailableError(str(exc)) from exc
-        return ClaimResult(_state(state), key, _b(result), _s(fp))
+        return ClaimResult(_state(state), key, _b(result), _s(fp), _s(tok))
 
     def commit(self, key: str, result: bytes) -> None:
         try:
@@ -115,9 +121,9 @@ class RedisStore(Store):
         except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
             raise StoreUnavailableError(str(exc)) from exc
 
-    def release(self, key: str) -> None:
+    def release(self, key: str, token: str | None = None) -> None:
         try:
-            self._release_s(keys=[self._k(key)], args=[])
+            self._release_s(keys=[self._k(key)], args=[token or ""])
         except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
             raise StoreUnavailableError(str(exc)) from exc
 
@@ -150,24 +156,36 @@ class RedisStore(Store):
 
     async def aclaim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
         self._ac()
+        token = uuid.uuid4().hex
         try:
-            state, result, fp = await self._aclaim_s(
-                keys=[self._k(key)], args=[fingerprint or "", self._now()]
+            state, result, fp, tok = await self._aclaim_s(
+                keys=[self._k(key)], args=[fingerprint or "", self._now(), token]
             )
         except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
             raise StoreUnavailableError(str(exc)) from exc
-        return ClaimResult(_state(state), key, _b(result), _s(fp))
+        return ClaimResult(_state(state), key, _b(result), _s(fp), _s(tok))
 
     async def acommit(self, key: str, result: bytes) -> None:
         self._ac()
-        await self._acommit_s(keys=[self._k(key)], args=[result, self._now(), self._committed_ttl])
+        try:
+            await self._acommit_s(
+                keys=[self._k(key)], args=[result, self._now(), self._committed_ttl]
+            )
+        except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
+            raise StoreUnavailableError(str(exc)) from exc
 
-    async def arelease(self, key: str) -> None:
+    async def arelease(self, key: str, token: str | None = None) -> None:
         self._ac()
-        await self._arelease_s(keys=[self._k(key)], args=[])
+        try:
+            await self._arelease_s(keys=[self._k(key)], args=[token or ""])
+        except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
+            raise StoreUnavailableError(str(exc)) from exc
 
     async def aget(self, key: str) -> ClaimRecord | None:
-        h = await self._ac().hgetall(self._k(key))
+        try:
+            h = await self._ac().hgetall(self._k(key))
+        except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
+            raise StoreUnavailableError(str(exc)) from exc
         return _hash_to_record(key, h)
 
     async def alist(self, state: State | None = None) -> Sequence[ClaimRecord]:
@@ -198,4 +216,5 @@ def _hash_to_record(key: str, h: dict[Any, Any]) -> ClaimRecord | None:
         fingerprint=_s(g.get("fingerprint")),
         created_at=float(created) if created else None,
         updated_at=float(updated) if updated else None,
+        token=_s(g.get("token")),
     )
