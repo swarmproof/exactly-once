@@ -23,12 +23,15 @@ class MemoryStore(Store):
         self._data: dict[str, ClaimRecord] = {}
         self._lock = threading.Lock()
 
-    def claim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
+    def claim(
+        self, key: str, *, fingerprint: str | None = None, lease_ttl: float | None = None
+    ) -> ClaimResult:
         with self._lock:
             row = self._data.get(key)
             if row is None:
                 now = time.time()
                 token = uuid.uuid4().hex
+                lease = now + lease_ttl if lease_ttl is not None else None
                 self._data[key] = ClaimRecord(
                     key=key,
                     state=State.IN_FLIGHT,
@@ -37,9 +40,12 @@ class MemoryStore(Store):
                     created_at=now,
                     updated_at=now,
                     token=token,
+                    lease_expires_at=lease,
                 )
-                return ClaimResult(State.FRESH, key, None, fingerprint, token)
-            return ClaimResult(row.state, key, row.result, row.fingerprint, row.token)
+                return ClaimResult(State.FRESH, key, None, fingerprint, token, lease)
+            return ClaimResult(
+                row.state, key, row.result, row.fingerprint, row.token, row.lease_expires_at
+            )
 
     def commit(self, key: str, result: bytes) -> None:
         with self._lock:
@@ -62,6 +68,14 @@ class MemoryStore(Store):
                 if token is not None and row.token != token:
                     return  # a peer has re-claimed since we observed it — no-op
                 del self._data[key]
+
+    def heartbeat(self, key: str, token: str, lease_ttl: float) -> bool:
+        with self._lock:
+            row = self._data.get(key)
+            if row is None or row.state is not State.IN_FLIGHT or row.token != token:
+                return False  # ownership lost — stop renewing
+            self._data[key] = replace(row, lease_expires_at=time.time() + lease_ttl)
+            return True
 
     def get(self, key: str) -> ClaimRecord | None:
         with self._lock:

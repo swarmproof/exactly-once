@@ -26,17 +26,21 @@ from .base import Store
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS effects (
-    key         TEXT PRIMARY KEY,
-    state       TEXT NOT NULL,
-    result      BLOB,
-    fingerprint TEXT,
-    created_at  REAL NOT NULL,
-    updated_at  REAL NOT NULL,
-    token       TEXT
+    key           TEXT PRIMARY KEY,
+    state         TEXT NOT NULL,
+    result        BLOB,
+    fingerprint   TEXT,
+    created_at    REAL NOT NULL,
+    updated_at    REAL NOT NULL,
+    token         TEXT,
+    lease_expires_at REAL
 );
 """
 
-_COLS = "key, state, result, fingerprint, created_at, updated_at, token"
+_COLS = "key, state, result, fingerprint, created_at, updated_at, token, lease_expires_at"
+_HEARTBEAT_SQL = (
+    "UPDATE effects SET lease_expires_at = ? WHERE key = ? AND state = ? AND token = ?;"
+)
 
 # A vanished-record race (INSERT conflicts, then a concurrent process releases the
 # row before our SELECT reads it) is retried a bounded number of times — never via
@@ -56,30 +60,36 @@ class SQLiteStore(Store):
         self._conn.execute("PRAGMA busy_timeout=5000;")
         self._conn.executescript(_SCHEMA)
 
-    def claim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
+    def claim(
+        self, key: str, *, fingerprint: str | None = None, lease_ttl: float | None = None
+    ) -> ClaimResult:
         now = time.time()
+        lease = now + lease_ttl if lease_ttl is not None else None
         with self._lock:
             for _attempt in range(_MAX_CLAIM_ATTEMPTS):
                 token = uuid.uuid4().hex
                 self._conn.execute("BEGIN IMMEDIATE;")
                 try:
                     self._conn.execute(
-                        f"INSERT INTO effects({_COLS}) VALUES (?, ?, NULL, ?, ?, ?, ?);",
-                        (key, State.IN_FLIGHT.value, fingerprint, now, now, token),
+                        f"INSERT INTO effects({_COLS}) VALUES (?, ?, NULL, ?, ?, ?, ?, ?);",
+                        (key, State.IN_FLIGHT.value, fingerprint, now, now, token, lease),
                     )
                 except sqlite3.IntegrityError:
                     self._conn.execute("ROLLBACK;")
                     row = self._conn.execute(
-                        "SELECT state, result, fingerprint, token FROM effects WHERE key = ?;",
+                        "SELECT state, result, fingerprint, token, lease_expires_at "
+                        "FROM effects WHERE key = ?;",
                         (key,),
                     ).fetchone()
                     if row is None:
                         continue  # vanished between our conflict and read — retry (no recursion)
-                    state, result, stored_fp, stored_token = row
-                    return ClaimResult(State(state), key, result, stored_fp, stored_token)
+                    state, result, stored_fp, stored_token, stored_lease = row
+                    return ClaimResult(
+                        State(state), key, result, stored_fp, stored_token, stored_lease
+                    )
                 else:
                     self._conn.execute("COMMIT;")
-                    return ClaimResult(State.FRESH, key, None, fingerprint, token)
+                    return ClaimResult(State.FRESH, key, None, fingerprint, token, lease)
             raise StoreUnavailableError(
                 f"claim for {key!r} did not converge after {_MAX_CLAIM_ATTEMPTS} attempts "
                 "under contention; failing closed (effect not run)."
@@ -96,9 +106,9 @@ class SQLiteStore(Store):
                 self._conn.execute("COMMIT;")
                 return  # idempotent
             self._conn.execute(
-                f"INSERT INTO effects({_COLS}) VALUES (?, ?, ?, NULL, ?, ?, NULL) "
+                f"INSERT INTO effects({_COLS}) VALUES (?, ?, ?, NULL, ?, ?, NULL, NULL) "
                 "ON CONFLICT(key) DO UPDATE SET state=excluded.state, result=excluded.result, "
-                "updated_at=excluded.updated_at;",
+                "updated_at=excluded.updated_at, lease_expires_at=NULL;",
                 (key, State.COMMITTED.value, result, now, now),
             )
             self._conn.execute("COMMIT;")
@@ -117,6 +127,17 @@ class SQLiteStore(Store):
                     (key, State.IN_FLIGHT.value, token),
                 )
             self._conn.execute("COMMIT;")
+
+    def heartbeat(self, key: str, token: str, lease_ttl: float) -> bool:
+        deadline = time.time() + lease_ttl
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE;")
+            cur = self._conn.execute(
+                _HEARTBEAT_SQL, (deadline, key, State.IN_FLIGHT.value, token)
+            )
+            renewed = cur.rowcount > 0
+            self._conn.execute("COMMIT;")
+        return renewed
 
     def get(self, key: str) -> ClaimRecord | None:
         with self._lock:
@@ -142,7 +163,7 @@ class SQLiteStore(Store):
 
 
 def _row_to_record(row: tuple[Any, ...]) -> ClaimRecord:
-    key, state, result, fingerprint, created_at, updated_at, token = row
+    key, state, result, fingerprint, created_at, updated_at, token, lease = row
     return ClaimRecord(
         key=str(key),
         state=State(state),
@@ -151,4 +172,5 @@ def _row_to_record(row: tuple[Any, ...]) -> ClaimRecord:
         created_at=float(created_at),
         updated_at=float(updated_at),
         token=None if token is None else str(token),
+        lease_expires_at=None if lease is None else float(lease),
     )

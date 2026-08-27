@@ -27,14 +27,33 @@ from .base import Store
 
 _CLAIM_LUA = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
-    redis.call('HSET', KEYS[1], 'state', 'in_flight', 'fingerprint', ARGV[1],
-               'created_at', ARGV[2], 'updated_at', ARGV[2], 'token', ARGV[3])
-    return {'fresh', '', ARGV[1], ARGV[3]}
+    local lease = ''
+    if tonumber(ARGV[4]) > 0 then
+        local t = redis.call('TIME')
+        lease = string.format('%.6f', tonumber(t[1]) + tonumber(t[2]) / 1000000 + tonumber(ARGV[4]))
+    end
+    redis.call('HSET', KEYS[1], 'state', 'in_flight', 'fingerprint', ARGV[1], 'created_at', ARGV[2],
+               'updated_at', ARGV[2], 'token', ARGV[3], 'lease_expires_at', lease)
+    return {'fresh', '', ARGV[1], ARGV[3], lease}
 end
 local result = redis.call('HGET', KEYS[1], 'result')
 return {redis.call('HGET', KEYS[1], 'state'), result or '',
         redis.call('HGET', KEYS[1], 'fingerprint') or '',
-        redis.call('HGET', KEYS[1], 'token') or ''}
+        redis.call('HGET', KEYS[1], 'token') or '',
+        redis.call('HGET', KEYS[1], 'lease_expires_at') or ''}
+"""
+
+# ARGV[1]=token, ARGV[2]=lease_ttl. Renew the lease iff we still own the IN_FLIGHT key.
+_HEARTBEAT_LUA = """
+if redis.call('HGET', KEYS[1], 'state') == 'in_flight'
+   and redis.call('HGET', KEYS[1], 'token') == ARGV[1] then
+    local t = redis.call('TIME')
+    local server_now = tonumber(t[1]) + tonumber(t[2]) / 1000000
+    redis.call('HSET', KEYS[1], 'lease_expires_at',
+               string.format('%.6f', server_now + tonumber(ARGV[2])))
+    return 1
+end
+return 0
 """
 
 _COMMIT_LUA = """
@@ -75,6 +94,11 @@ def _state(v: Any) -> State:
     return State(s)
 
 
+def _f(v: Any) -> float | None:
+    s = _s(v)
+    return float(s) if s is not None else None
+
+
 class RedisStore(Store):
     def __init__(
         self, url: str = "redis://localhost:6379/0", *, prefix: str = "eo:", committed_ttl: int = 0
@@ -93,6 +117,7 @@ class RedisStore(Store):
         self._claim_s = self._client.register_script(_CLAIM_LUA)
         self._commit_s = self._client.register_script(_COMMIT_LUA)
         self._release_s = self._client.register_script(_RELEASE_LUA)
+        self._heartbeat_s = self._client.register_script(_HEARTBEAT_LUA)
         self._aclient: Any = None
 
     def _k(self, key: str) -> str:
@@ -105,15 +130,17 @@ class RedisStore(Store):
 
     # --- sync ---
 
-    def claim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
+    def claim(
+        self, key: str, *, fingerprint: str | None = None, lease_ttl: float | None = None
+    ) -> ClaimResult:
         token = uuid.uuid4().hex
         try:
-            state, result, fp, tok = self._claim_s(
-                keys=[self._k(key)], args=[fingerprint or "", self._now(), token]
+            state, result, fp, tok, lease = self._claim_s(
+                keys=[self._k(key)], args=[fingerprint or "", self._now(), token, lease_ttl or 0]
             )
         except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
             raise StoreUnavailableError(str(exc)) from exc
-        return ClaimResult(_state(state), key, _b(result), _s(fp), _s(tok))
+        return ClaimResult(_state(state), key, _b(result), _s(fp), _s(tok), _f(lease))
 
     def commit(self, key: str, result: bytes) -> None:
         try:
@@ -126,6 +153,19 @@ class RedisStore(Store):
             self._release_s(keys=[self._k(key)], args=[token or ""])
         except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
             raise StoreUnavailableError(str(exc)) from exc
+
+    def heartbeat(self, key: str, token: str, lease_ttl: float) -> bool:
+        try:
+            return bool(self._heartbeat_s(keys=[self._k(key)], args=[token, lease_ttl]))
+        except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
+            raise StoreUnavailableError(str(exc)) from exc
+
+    def now(self) -> float:
+        try:
+            secs, usecs = self._client.time()  # Redis server clock — the lease reference
+        except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
+            raise StoreUnavailableError(str(exc)) from exc
+        return float(secs) + float(usecs) / 1_000_000
 
     def get(self, key: str) -> ClaimRecord | None:
         h = self._client.hgetall(self._k(key))
@@ -152,18 +192,21 @@ class RedisStore(Store):
             self._aclaim_s = self._aclient.register_script(_CLAIM_LUA)
             self._acommit_s = self._aclient.register_script(_COMMIT_LUA)
             self._arelease_s = self._aclient.register_script(_RELEASE_LUA)
+            self._aheartbeat_s = self._aclient.register_script(_HEARTBEAT_LUA)
         return self._aclient
 
-    async def aclaim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
+    async def aclaim(
+        self, key: str, *, fingerprint: str | None = None, lease_ttl: float | None = None
+    ) -> ClaimResult:
         self._ac()
         token = uuid.uuid4().hex
         try:
-            state, result, fp, tok = await self._aclaim_s(
-                keys=[self._k(key)], args=[fingerprint or "", self._now(), token]
+            state, result, fp, tok, lease = await self._aclaim_s(
+                keys=[self._k(key)], args=[fingerprint or "", self._now(), token, lease_ttl or 0]
             )
         except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
             raise StoreUnavailableError(str(exc)) from exc
-        return ClaimResult(_state(state), key, _b(result), _s(fp), _s(tok))
+        return ClaimResult(_state(state), key, _b(result), _s(fp), _s(tok), _f(lease))
 
     async def acommit(self, key: str, result: bytes) -> None:
         self._ac()
@@ -180,6 +223,20 @@ class RedisStore(Store):
             await self._arelease_s(keys=[self._k(key)], args=[token or ""])
         except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
             raise StoreUnavailableError(str(exc)) from exc
+
+    async def aheartbeat(self, key: str, token: str, lease_ttl: float) -> bool:
+        self._ac()
+        try:
+            return bool(await self._aheartbeat_s(keys=[self._k(key)], args=[token, lease_ttl]))
+        except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
+            raise StoreUnavailableError(str(exc)) from exc
+
+    async def anow(self) -> float:
+        try:
+            secs, usecs = await self._ac().time()
+        except (self._redis.ConnectionError, self._redis.TimeoutError) as exc:
+            raise StoreUnavailableError(str(exc)) from exc
+        return float(secs) + float(usecs) / 1_000_000
 
     async def aget(self, key: str) -> ClaimRecord | None:
         try:
@@ -217,4 +274,5 @@ def _hash_to_record(key: str, h: dict[Any, Any]) -> ClaimRecord | None:
         created_at=float(created) if created else None,
         updated_at=float(updated) if updated else None,
         token=_s(g.get("token")),
+        lease_expires_at=_f(g.get("lease_expires_at")),
     )

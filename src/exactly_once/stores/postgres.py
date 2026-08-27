@@ -15,6 +15,9 @@ connection (psycopg forbids concurrent operations on one connection). True
 multi-writer concurrency comes from *separate* processes/connections, which
 Postgres itself serializes.
 
+Leases use the **server clock** (``extract(epoch from now())``) so workers on
+skewed hosts agree on expiry.
+
 Requires the ``postgres`` extra: ``pip install "exactly-once[postgres]"``.
 """
 
@@ -33,33 +36,44 @@ from .base import Store
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS effects (
-    key         text PRIMARY KEY,
-    state       text NOT NULL,
-    result      bytea,
-    fingerprint text,
-    created_at  double precision NOT NULL,
-    updated_at  double precision NOT NULL,
-    token       text
+    key              text PRIMARY KEY,
+    state            text NOT NULL,
+    result           bytea,
+    fingerprint      text,
+    created_at       double precision NOT NULL,
+    updated_at       double precision NOT NULL,
+    token            text,
+    lease_expires_at double precision
 );
 """
 
 _MAX_RETRIES = 5
 
+# The lease deadline is computed with the SERVER clock (a single reference for all
+# workers), and returned so the winning claim carries it.
 _CLAIM_SQL = (
-    "INSERT INTO effects(key, state, result, fingerprint, created_at, updated_at, token) "
-    "VALUES (%s, 'in_flight', NULL, %s, %s, %s, %s) "
-    "ON CONFLICT (key) DO NOTHING RETURNING key;"
+    "INSERT INTO effects(key, state, result, fingerprint, created_at, updated_at, token, "
+    "lease_expires_at) VALUES (%s, 'in_flight', NULL, %s, %s, %s, %s, "
+    "CASE WHEN %s IS NULL THEN NULL ELSE extract(epoch from now()) + %s END) "
+    "ON CONFLICT (key) DO NOTHING RETURNING key, lease_expires_at;"
 )
-_SELECT_SQL = "SELECT state, result, fingerprint, token FROM effects WHERE key = %s;"
+_SELECT_SQL = (
+    "SELECT state, result, fingerprint, token, lease_expires_at FROM effects WHERE key = %s;"
+)
 _COMMIT_SQL = (
-    "INSERT INTO effects(key, state, result, fingerprint, created_at, updated_at, token) "
-    "VALUES (%s, 'committed', %s, NULL, %s, %s, NULL) "
+    "INSERT INTO effects(key, state, result, fingerprint, created_at, updated_at, token, "
+    "lease_expires_at) VALUES (%s, 'committed', %s, NULL, %s, %s, NULL, NULL) "
     "ON CONFLICT (key) DO UPDATE SET state='committed', result=EXCLUDED.result, "
-    "updated_at=EXCLUDED.updated_at WHERE effects.state <> 'committed';"
+    "updated_at=EXCLUDED.updated_at, lease_expires_at=NULL WHERE effects.state <> 'committed';"
 )
 _DELETE_SQL = "DELETE FROM effects WHERE key = %s AND state = 'in_flight';"
 _DELETE_TOKEN_SQL = "DELETE FROM effects WHERE key = %s AND state = 'in_flight' AND token = %s;"
-_LEDGER_COLS = "key, state, result, fingerprint, created_at, updated_at, token"
+_HEARTBEAT_SQL = (
+    "UPDATE effects SET lease_expires_at = extract(epoch from now()) + %s "
+    "WHERE key = %s AND state = 'in_flight' AND token = %s;"
+)
+_NOW_SQL = "SELECT extract(epoch from now());"
+_LEDGER_COLS = "key, state, result, fingerprint, created_at, updated_at, token, lease_expires_at"
 
 
 class PostgresStore(Store):
@@ -102,17 +116,20 @@ class PostgresStore(Store):
                 raise StoreUnavailableError(str(exc)) from exc
         raise RuntimeError("unreachable")  # pragma: no cover
 
-    def claim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
+    def claim(
+        self, key: str, *, fingerprint: str | None = None, lease_ttl: float | None = None
+    ) -> ClaimResult:
         now = time.time()
         token = uuid.uuid4().hex
 
         def _do(cur: Any) -> ClaimResult:
-            cur.execute(_CLAIM_SQL, (key, fingerprint, now, now, token))
-            if cur.fetchone() is not None:
-                return ClaimResult(State.FRESH, key, None, fingerprint, token)
+            cur.execute(_CLAIM_SQL, (key, fingerprint, now, now, token, lease_ttl, lease_ttl))
+            won = cur.fetchone()
+            if won is not None:
+                return ClaimResult(State.FRESH, key, None, fingerprint, token, won[1])
             cur.execute(_SELECT_SQL, (key,))
-            st, res, fp, tok = cur.fetchone()
-            return ClaimResult(State(st), key, _to_bytes(res), fp, tok)
+            st, res, fp, tok, lease = cur.fetchone()
+            return ClaimResult(State(st), key, _to_bytes(res), fp, tok, lease)
 
         return self._tx(_do)  # type: ignore[no-any-return]
 
@@ -132,6 +149,20 @@ class PostgresStore(Store):
                 cur.execute(_DELETE_TOKEN_SQL, (key, token))
 
         self._tx(_do)
+
+    def heartbeat(self, key: str, token: str, lease_ttl: float) -> bool:
+        def _do(cur: Any) -> bool:
+            cur.execute(_HEARTBEAT_SQL, (lease_ttl, key, token))
+            return bool(cur.rowcount > 0)
+
+        return self._tx(_do)  # type: ignore[no-any-return]
+
+    def now(self) -> float:
+        def _do(cur: Any) -> float:
+            cur.execute(_NOW_SQL)
+            return float(cur.fetchone()[0])
+
+        return self._tx(_do)  # type: ignore[no-any-return]
 
     def get(self, key: str) -> ClaimRecord | None:
         with self._lock, self._conn.cursor() as cur:
@@ -161,7 +192,9 @@ class PostgresStore(Store):
             self._alock = asyncio.Lock()
         return self._aconn
 
-    async def aclaim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
+    async def aclaim(
+        self, key: str, *, fingerprint: str | None = None, lease_ttl: float | None = None
+    ) -> ClaimResult:
         conn = await self._ac()
         assert self._alock is not None
         now = time.time()
@@ -171,12 +204,15 @@ class PostgresStore(Store):
             for attempt in range(self._max_retries):
                 try:
                     async with conn.transaction(), conn.cursor() as cur:
-                        await cur.execute(_CLAIM_SQL, (key, fingerprint, now, now, token))
-                        if await cur.fetchone() is not None:
-                            return ClaimResult(State.FRESH, key, None, fingerprint, token)
+                        await cur.execute(
+                            _CLAIM_SQL, (key, fingerprint, now, now, token, lease_ttl, lease_ttl)
+                        )
+                        won = await cur.fetchone()
+                        if won is not None:
+                            return ClaimResult(State.FRESH, key, None, fingerprint, token, won[1])
                         await cur.execute(_SELECT_SQL, (key,))
-                        st, res, fp, tok = await cur.fetchone()
-                        return ClaimResult(State(st), key, _to_bytes(res), fp, tok)
+                        st, res, fp, tok, lease = await cur.fetchone()
+                        return ClaimResult(State(st), key, _to_bytes(res), fp, tok, lease)
                 except errors.SerializationFailure:
                     if attempt == self._max_retries - 1:
                         raise
@@ -198,6 +234,20 @@ class PostgresStore(Store):
             else:
                 await cur.execute(_DELETE_TOKEN_SQL, (key, token))
 
+    async def aheartbeat(self, key: str, token: str, lease_ttl: float) -> bool:
+        conn = await self._ac()
+        assert self._alock is not None
+        async with self._alock, conn.transaction(), conn.cursor() as cur:
+            await cur.execute(_HEARTBEAT_SQL, (lease_ttl, key, token))
+            return bool(cur.rowcount > 0)
+
+    async def anow(self) -> float:
+        conn = await self._ac()
+        assert self._alock is not None
+        async with self._alock, conn.cursor() as cur:
+            await cur.execute(_NOW_SQL)
+            return float((await cur.fetchone())[0])
+
     async def aclose(self) -> None:
         if self._aconn is not None:
             await self._aconn.close()
@@ -210,7 +260,7 @@ def _to_bytes(v: Any) -> bytes | None:
 
 
 def _row_to_record(row: tuple[Any, ...]) -> ClaimRecord:
-    key, state, result, fingerprint, created_at, updated_at, token = row
+    key, state, result, fingerprint, created_at, updated_at, token, lease = row
     return ClaimRecord(
         key=key,
         state=State(state),
@@ -219,4 +269,5 @@ def _row_to_record(row: tuple[Any, ...]) -> ClaimRecord:
         created_at=float(created_at),
         updated_at=float(updated_at),
         token=token,
+        lease_expires_at=None if lease is None else float(lease),
     )
