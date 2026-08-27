@@ -7,6 +7,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Onchain adapter** (`exactly_once.onchain`, `[onchain]` extra) — a resumed agent
+  never double-submits a transaction (#8). Keys on `(chain_id, from, nonce,
+  calldata_hash)` — the nonce is the chain's idempotency token — and reconciles a
+  crash by *observing the chain* (mined → replay the hash; nonce free → re-sign at
+  the same nonce; pending → quarantine). Built on a small `ChainClient` protocol
+  (unit-tested with a fake) with a `Web3ChainClient` for production; the crash/resume
+  E2E runs against a real Anvil node.
 - **Lease / heartbeat reconciliation** (`once(..., lease_ttl=...)`) — makes the
   release-based policies (`check_then_decide`, `auto_retry`) concurrency-safe,
   closing the L-8 gap from the pre-release audit (#11). While a guarded effect runs,
