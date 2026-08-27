@@ -37,7 +37,9 @@ class Store(ABC):
     # --- the atomic core ---------------------------------------------------
 
     @abstractmethod
-    def claim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
+    def claim(
+        self, key: str, *, fingerprint: str | None = None, lease_ttl: float | None = None
+    ) -> ClaimResult:
         """ATOMIC check-and-set.
 
         * No record → create ``IN_FLIGHT`` (storing ``fingerprint`` and a
@@ -46,6 +48,10 @@ class Store(ABC):
         * ``COMMITTED`` → return ``state=COMMITTED`` + the stored ``result``.
 
         MUST be atomic: under concurrency, exactly one caller sees ``FRESH``.
+
+        If ``lease_ttl`` is given, a fresh claim stamps ``lease_expires_at`` =
+        ``now() + lease_ttl`` using the **store's own clock**, so reconcilers can tell
+        a live owner from a dead one without depending on any worker's wall clock.
         """
 
     @abstractmethod
@@ -62,6 +68,29 @@ class Store(ABC):
         With ``token=None`` it deletes any ``IN_FLIGHT`` record (internal/pre-effect).
         """
 
+    def heartbeat(self, key: str, token: str, lease_ttl: float) -> bool:
+        """Renew the lease of an owned ``IN_FLIGHT`` key (opt-in; L-8).
+
+        Extends ``lease_expires_at`` to ``now() + lease_ttl`` **iff** the record is
+        ``IN_FLIGHT`` and still carries ``token``. Returns ``True`` if the lease was
+        renewed, ``False`` if ownership was lost (committed, released, or re-claimed).
+        The default raises ``NotImplementedError``; stores that support leases
+        override it. Called periodically by the ``once`` heartbeat while an effect
+        runs, so a slow-but-alive worker is never mistaken for a dead one.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support leases")
+
+    def now(self) -> float:
+        """The store's clock (epoch seconds) — the single reference for lease expiry.
+
+        Default is the local wall clock, correct for single-host stores (memory,
+        SQLite). Distributed stores (Redis, Postgres) override this to use the
+        *server's* clock, so workers on skewed hosts still agree on expiry.
+        """
+        import time
+
+        return time.time()
+
     # --- ledger (read-only) ------------------------------------------------
 
     @abstractmethod
@@ -77,14 +106,28 @@ class Store(ABC):
 
     # --- async parity: default delegates to the sync path in a thread ------
 
-    async def aclaim(self, key: str, *, fingerprint: str | None = None) -> ClaimResult:
-        return await asyncio.to_thread(self.claim, key, fingerprint=fingerprint)
+    async def aclaim(
+        self, key: str, *, fingerprint: str | None = None, lease_ttl: float | None = None
+    ) -> ClaimResult:
+        # Forward lease_ttl only when set, so a custom store whose sync claim predates
+        # the lease contract still works through the default async path.
+        if lease_ttl is None:
+            return await asyncio.to_thread(lambda: self.claim(key, fingerprint=fingerprint))
+        return await asyncio.to_thread(
+            lambda: self.claim(key, fingerprint=fingerprint, lease_ttl=lease_ttl)
+        )
 
     async def acommit(self, key: str, result: bytes) -> None:
         await asyncio.to_thread(self.commit, key, result)
 
     async def arelease(self, key: str, token: str | None = None) -> None:
         await asyncio.to_thread(self.release, key, token)
+
+    async def aheartbeat(self, key: str, token: str, lease_ttl: float) -> bool:
+        return await asyncio.to_thread(self.heartbeat, key, token, lease_ttl)
+
+    async def anow(self) -> float:
+        return await asyncio.to_thread(self.now)
 
     async def aget(self, key: str) -> ClaimRecord | None:
         return await asyncio.to_thread(self.get, key)
