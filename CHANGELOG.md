@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Lease / heartbeat reconciliation** (`once(..., lease_ttl=...)`) — makes the
+  release-based policies (`check_then_decide`, `auto_retry`) concurrency-safe,
+  closing the L-8 gap from the pre-release audit (#11). While a guarded effect runs,
+  `once` renews a lease on the **store's clock** via a background heartbeat; a
+  reconciler adopts an orphan only once its lease has expired, and the ownership
+  token makes the takeover single-winner. A live owner is never adopted; a dead
+  one's orphan is, by exactly one reconciler. Off by default — no behavior change
+  unless `lease_ttl` is set.
+- Store contract gains `heartbeat()` and `now()` (server clock); `claim()` accepts
+  `lease_ttl`. Backward-compatible: a store that predates the lease contract keeps
+  working for non-lease use.
+
 ## [0.1.0] — the primitive
 
 First public release.
