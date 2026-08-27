@@ -44,6 +44,11 @@ class ClaimResult:
     passes it to :meth:`Store.release` so release is a compare-and-delete: only the
     observer of *this* claim can retire it, never a concurrent reconciler that has
     since re-claimed the key."""
+    lease_expires_at: float | None = None
+    """When the current owner's lease expires, in the *store's* clock (epoch
+    seconds), or ``None`` if no lease is in force. A reconciler compares it against
+    :meth:`Store.now` to tell a live owner (lease still valid → do not adopt) from a
+    dead one (lease expired → safe to adopt). See ARCH §9 L-8."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,3 +67,4 @@ class ClaimRecord:
     created_at: float | None = None
     updated_at: float | None = None
     token: str | None = None
+    lease_expires_at: float | None = None
