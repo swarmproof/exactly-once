@@ -35,7 +35,7 @@ Changelog = "https://github.com/swarmproof/exactly-once/blob/main/CHANGELOG.md"
 [project.optional-dependencies]
 redis = ["redis>=5.0"]
 postgres = ["psycopg[binary]>=3.2"]
-# NOTE: the onchain adapter is v0.2 — no `[onchain]` extra is published until it exists.
+onchain = ["web3>=6.0"]
 dev = [
     "pytest>=8.4",
     "pytest-asyncio>=1.0",
@@ -46,6 +46,7 @@ dev = [
     "ruff>=0.5",
     "redis>=5.0",
     "psycopg[binary]>=3.2",
+    "web3>=6.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -72,7 +73,7 @@ warn_redundant_casts = true
 
 [[tool.mypy.overrides]]
 # Optional backends may be absent in a given environment.
-module = ["redis.*", "psycopg.*", "web3.*", "testcontainers.*"]
+module = ["redis.*", "psycopg.*", "web3.*", "eth_account.*", "testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
