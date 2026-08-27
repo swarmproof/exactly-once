@@ -54,7 +54,9 @@ _MAX_RETRIES = 5
 _CLAIM_SQL = (
     "INSERT INTO effects(key, state, result, fingerprint, created_at, updated_at, token, "
     "lease_expires_at) VALUES (%s, 'in_flight', NULL, %s, %s, %s, %s, "
-    "CASE WHEN %s IS NULL THEN NULL ELSE extract(epoch from now()) + %s END) "
+    # cast so Postgres can type the parameter even when it is NULL (no lease)
+    "CASE WHEN %s::double precision IS NULL THEN NULL "
+    "ELSE extract(epoch from now()) + %s::double precision END) "
     "ON CONFLICT (key) DO NOTHING RETURNING key, lease_expires_at;"
 )
 _SELECT_SQL = (
@@ -69,7 +71,7 @@ _COMMIT_SQL = (
 _DELETE_SQL = "DELETE FROM effects WHERE key = %s AND state = 'in_flight';"
 _DELETE_TOKEN_SQL = "DELETE FROM effects WHERE key = %s AND state = 'in_flight' AND token = %s;"
 _HEARTBEAT_SQL = (
-    "UPDATE effects SET lease_expires_at = extract(epoch from now()) + %s "
+    "UPDATE effects SET lease_expires_at = extract(epoch from now()) + %s::double precision "
     "WHERE key = %s AND state = 'in_flight' AND token = %s;"
 )
 _NOW_SQL = "SELECT extract(epoch from now());"
