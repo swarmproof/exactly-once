@@ -87,6 +87,11 @@ def test_e2e4_crash_mid_broadcast_resumes_without_double_submit(w3) -> None:
 
     key = onchain_key(chain.chain_id, chain.address, 0, _intent().data)
     assert store.get(key).state is State.IN_FLIGHT
+
+    # The broadcast tx confirms while the agent is "down" — wait for it explicitly
+    # (broadcast != mined; don't assume the node instant-mined by the time we look).
+    broadcast_hash, _ = chain.sign(_intent(), 0)
+    w3.eth.wait_for_transaction_receipt(broadcast_hash, timeout=15)
     assert chain.latest_nonce() == 1  # the tx really did mine on-chain
 
     # Resume: the prober sees the tx mined and replays its hash — no new tx.
