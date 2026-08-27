@@ -36,6 +36,8 @@ Changelog = "https://github.com/swarmproof/exactly-once/blob/main/CHANGELOG.md"
 redis = ["redis>=5.0"]
 postgres = ["psycopg[binary]>=3.2"]
 onchain = ["web3>=6.0"]
+langgraph = ["langgraph>=0.2"]
+crewai = ["crewai>=0.5"]
 dev = [
     "pytest>=8.4",
     "pytest-asyncio>=1.0",
