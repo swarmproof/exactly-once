@@ -7,6 +7,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Framework helpers** (`exactly_once.integrations`, `[langgraph]` / `[crewai]`
+  extras) — `once_node` guards a LangGraph node (default key: run `thread_id` + node
+  name) and `once_tool_run` guards a CrewAI tool's `_run` (default key: tool name +
+  args) (#10). Thin adapters, not forks; lazy imports, so neither framework is a hard
+  dependency. Semantics identical to raw `@once`.
 - **Onchain adapter** (`exactly_once.onchain`, `[onchain]` extra) — a resumed agent
   never double-submits a transaction (#8). Keys on `(chain_id, from, nonce,
   calldata_hash)` — the nonce is the chain's idempotency token — and reconciles a

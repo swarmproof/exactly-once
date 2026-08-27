@@ -48,3 +48,15 @@ jobs:
           uv run pytest -q
           --cov=exactly_once --cov-report=term-missing
           --cov-fail-under=85
+
+  # LangGraph + CrewAI are heavy, fast-moving deps — isolated in their own job so the
+  # main matrix stays fast. Runs only the framework smoke tests (E2E-5).
+  integrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.12
+      - run: uv pip install -e ".[dev,langgraph,crewai]"
+      - name: Framework integration smoke tests — G5 / E2E-5
+        run: uv run pytest tests/test_integrations.py -q
