@@ -107,6 +107,16 @@ def test_redis_exception_leaves_in_flight(redis_store: Store) -> None:
 
 
 @pytest.mark.redis
+def test_redis_lease_server_clock(redis_store: Store) -> None:
+    # The lease deadline is computed against the Redis server clock (TIME), not the
+    # worker's, so it must land ahead of the store's own now().
+    r = redis_store.claim("leased", lease_ttl=30.0)
+    assert r.lease_expires_at is not None and r.lease_expires_at > redis_store.now()
+    assert redis_store.heartbeat("leased", r.token, 60.0) is True
+    assert redis_store.heartbeat("leased", "wrong", 60.0) is False
+
+
+@pytest.mark.redis
 async def test_redis_async(redis_store: Store) -> None:
     n = {"c": 0}
 
@@ -182,6 +192,14 @@ def test_pg_exception_leaves_in_flight(pg_store: Store) -> None:
     with pytest.raises(ValueError):
         risky()
     assert pg_store.get("risky").state is State.IN_FLIGHT
+
+
+@pytest.mark.postgres
+def test_pg_lease_server_clock(pg_store: Store) -> None:
+    r = pg_store.claim("leased", lease_ttl=30.0)
+    assert r.lease_expires_at is not None and r.lease_expires_at > pg_store.now()
+    assert pg_store.heartbeat("leased", r.token, 60.0) is True
+    assert pg_store.heartbeat("leased", "wrong", 60.0) is False
 
 
 @pytest.mark.postgres
