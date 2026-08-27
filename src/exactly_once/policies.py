@@ -70,6 +70,16 @@ class ProbeResult:
 _Store = Any
 
 
+def _lease_valid(store: _Store, claim: ClaimResult) -> bool:
+    """True if the claim's lease is still in force per the *store's* clock — i.e. a
+    live owner holds it, so a reconciler must NOT adopt (L-8)."""
+    return claim.lease_expires_at is not None and store.now() < claim.lease_expires_at
+
+
+async def _alease_valid(store: _Store, claim: ClaimResult) -> bool:
+    return claim.lease_expires_at is not None and (await store.anow()) < claim.lease_expires_at
+
+
 class Policy:
     """Base class. Override :meth:`resolve` (sync) and :meth:`aresolve` (async)."""
 
@@ -122,24 +132,28 @@ class Fail(Policy):
 class AutoRetry(Policy):
     """Release an orphaned key and re-run the effect (REQ-R3).
 
-    ⚠️ Two warnings. (1) This re-opens the double-fire window and is the
-    AWS-Powertools-style delete-and-rerun behavior this library rejects *by
-    default*; use it **only** for genuinely idempotent, reversible effects (an email
-    you'd tolerate twice), never for payments or onchain transactions. (2) It is a
-    **single-reconciler / crash-recovery** policy: it assumes the worker that left
-    the key ``IN_FLIGHT`` is *gone*, not still running. The ownership token stops a
-    stale reconciler from deleting a newer claim, but under concurrent reconcilers it
-    can still double-fire. For the concurrency case use :class:`Quarantine` (default)
-    or :class:`Wait`.
+    ⚠️ This re-opens the double-fire window and is the AWS-Powertools-style
+    delete-and-rerun behavior this library rejects *by default*; use it **only** for
+    genuinely idempotent, reversible effects (an email you'd tolerate twice), never
+    for payments or onchain transactions.
+
+    **Concurrency:** without a lease this is single-reconciler (crash-recovery) — it
+    assumes the worker that left the key ``IN_FLIGHT`` is gone. With a lease
+    (``once(..., lease_ttl=...)``) it becomes concurrency-safe: a key whose lease is
+    still valid belongs to a live owner and is left quarantined rather than adopted.
     """
 
     def resolve(self, key: str, store: _Store, claim: ClaimResult, codec: Codec) -> Directive:
+        if _lease_valid(store, claim):
+            return Directive(Action.QUARANTINE, sentinel=_UNSET)  # live owner — do not adopt
         store.release(key, claim.token)
         return Directive(Action.RUN)
 
     async def aresolve(
         self, key: str, store: _Store, claim: ClaimResult, codec: Codec
     ) -> Directive:
+        if await _alease_valid(store, claim):
+            return Directive(Action.QUARANTINE, sentinel=_UNSET)
         await store.arelease(key, claim.token)
         return Directive(Action.RUN)
 
@@ -157,13 +171,13 @@ class CheckThenDecide(Policy):
 
     The prober may be sync or async.
 
-    ⚠️ **Single-reconciler / crash-recovery policy.** Safe when one worker reconciles
-    an orphan left by a *crashed* (gone) worker — the flagship crash-mid-payment
-    case. It is **not** concurrency-safe: if several live workers reconcile the same
-    key at once, a ``NOT_COMMITTED`` verdict means "not committed *yet*," not "no one
-    is running it," so more than one may run. Distinguishing a slow live worker from
-    a dead one needs a lease/heartbeat (v0.2). For concurrent workers on one key, use
-    :class:`Quarantine` (default) or :class:`Wait`.
+    **Concurrency:** without a lease this is single-reconciler (crash-recovery) —
+    safe when one worker reconciles an orphan left by a *crashed* worker (the
+    flagship crash-mid-payment case), but if several live workers reconcile at once a
+    ``NOT_COMMITTED`` verdict means "not committed *yet*," not "no one is running it."
+    Add a lease (``once(..., lease_ttl=...)``) to make it concurrency-safe: a key
+    whose lease is still valid is left to its live owner (quarantined), and only an
+    expired-lease orphan is probed and adopted.
     """
 
     def __init__(self, prober: Callable[[str], ProbeResult | Any]) -> None:
@@ -180,6 +194,8 @@ class CheckThenDecide(Policy):
         return Directive(Action.QUARANTINE, sentinel=_UNSET)
 
     def resolve(self, key: str, store: _Store, claim: ClaimResult, codec: Codec) -> Directive:
+        if _lease_valid(store, claim):
+            return Directive(Action.QUARANTINE, sentinel=_UNSET)  # live owner — do not probe/adopt
         probe = self._prober(key)
         if inspect.isawaitable(probe):  # pragma: no cover - defensive
             raise TypeError("async prober used with a sync call; use an async effect")
@@ -193,6 +209,8 @@ class CheckThenDecide(Policy):
     async def aresolve(
         self, key: str, store: _Store, claim: ClaimResult, codec: Codec
     ) -> Directive:
+        if await _alease_valid(store, claim):
+            return Directive(Action.QUARANTINE, sentinel=_UNSET)
         probe = self._prober(key)
         if inspect.isawaitable(probe):
             probe = await probe
