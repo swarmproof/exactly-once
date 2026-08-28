@@ -19,7 +19,7 @@ jobs:
       - run: uv venv --python 3.12
       - run: uv pip install -e ".[dev]"
       - name: Ruff (lint)
-        run: uv run ruff check src tests examples
+        run: uv run ruff check src tests examples scripts
       - name: Mypy (strict) — G-TYPE
         run: uv run mypy src/exactly_once
       - name: Docs-honesty lint — G-DOCS

@@ -81,7 +81,10 @@ uv run pytest                              # full suite (Redis/Postgres tests ne
 uv run mypy src/exactly_once               # strict typing
 uv run ruff check src tests examples       # lint
 uv run python scripts/check_docs_honesty.py  # the docs-honesty gate
+uv run python scripts/benchmark.py           # per-call overhead (NFR-8)
 ```
+
+Overhead per guarded call is one store round-trip plus key/codec work — a few microseconds on the in-memory store; real deployments are dominated by the store's own latency.
 
 ## Part of the Swarm Proof toolkit
 
