@@ -59,6 +59,16 @@ class SQLiteStore(Store):
         self._conn.execute("PRAGMA synchronous=NORMAL;")
         self._conn.execute("PRAGMA busy_timeout=5000;")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        # CREATE TABLE IF NOT EXISTS is a no-op on a table from an older version, so
+        # add any columns introduced later. Idempotent: skips columns already present.
+        # (token: v0.1.0; lease_expires_at: v0.2.0.) Column names are a fixed literal set.
+        present = {row[1] for row in self._conn.execute("PRAGMA table_info(effects);")}
+        for column, decl in (("token", "TEXT"), ("lease_expires_at", "REAL")):
+            if column not in present:
+                self._conn.execute(f"ALTER TABLE effects ADD COLUMN {column} {decl};")
 
     def claim(
         self, key: str, *, fingerprint: str | None = None, lease_ttl: float | None = None
