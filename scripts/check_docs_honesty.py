@@ -55,7 +55,8 @@ def check_file(path: Path) -> list[str]:
             if not any(neg in low for neg in _NEGATORS):
                 problems.append(
                     f"{rel}: claims 'exactly-once delivery' without negating it — "
-                    f"delivery is impossible; scope it as effect/at-most-once:\n    “{sentence[:160]}”"
+                    "delivery is impossible; scope it as effect/at-most-once:\n"
+                    f"    “{sentence[:160]}”"
                 )
 
     # Rule 2: the scoping language must be present somewhere in the doc.
