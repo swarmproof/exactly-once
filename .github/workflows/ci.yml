@@ -47,7 +47,7 @@ jobs:
         run: >
           uv run pytest -q
           --cov=exactly_once --cov-report=term-missing
-          --cov-fail-under=85
+          --cov-fail-under=90
 
   # LangGraph + CrewAI are heavy, fast-moving deps — isolated in their own job so the
   # main matrix stays fast. Runs only the framework smoke tests (E2E-5).
