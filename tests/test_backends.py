@@ -216,3 +216,29 @@ async def test_pg_async(pg_store: Store) -> None:
     assert n["c"] == 1
     await pg_store.arelease("nonexistent")  # no-op path
     await pg_store.aclose()
+
+
+@pytest.mark.postgres
+def test_pg_upgrades_an_old_database(pg_dsn: str) -> None:
+    """A v0.1.0-era table (no lease_expires_at) must be migrated on open, not crash."""
+    import psycopg
+
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS effects;")
+        cur.execute(
+            "CREATE TABLE effects (key text PRIMARY KEY, state text NOT NULL, result bytea, "
+            "fingerprint text, created_at double precision NOT NULL, "
+            "updated_at double precision NOT NULL, token text);"
+        )
+
+    store = Store.postgres(pg_dsn)  # ADD COLUMN IF NOT EXISTS migrates it
+    n = {"c": 0}
+
+    @once(store, key="charge:mig", lease_ttl=30.0)
+    def charge() -> str:
+        n["c"] += 1
+        return "ok"
+
+    assert charge() == charge() == "ok"
+    assert n["c"] == 1
+    store.close()
