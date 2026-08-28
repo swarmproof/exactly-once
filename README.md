@@ -8,6 +8,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Typed](https://img.shields.io/badge/typed-py.typed-blue.svg)](https://peps.python.org/pep-0561/)
 
+![An agent crashes mid-payment, resumes, and charges once with @once — versus twice without it](docs/demo.gif)
+
 > This is exactly-once **effect** (at-most-once execution + replay-on-success) — **not** exactly-once *delivery*, which is impossible (Two Generals / FLP). The library is scrupulous about that line; see [Guarantees & limits](#guarantees--limits).
 
 ---
