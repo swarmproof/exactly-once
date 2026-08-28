@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Fixed
+- **Durable-store schema migration.** Opening a SQLite or Postgres database created
+  by an earlier version now adds the columns introduced since (idempotent
+  `ALTER TABLE ... ADD COLUMN`) instead of failing with "no such column" on the first
+  guarded call. `CREATE TABLE IF NOT EXISTS` left an older table untouched, so a
+  returning user upgrading across versions hit the error; fresh databases were never
+  affected (and so CI never caught it).
+
 ## [0.2.0] — reach
 
 ### Added
@@ -64,6 +74,7 @@ single-reconciler scope of `check_then_decide` / `auto_retry` — is in
 Onchain adapter (dedupe by nonce + calldata-hash), TypeScript port, LangGraph/CrewAI
 helpers, lease/heartbeat-based reconciliation for the concurrent-reconciler case.
 
-[Unreleased]: https://github.com/swarmproof/exactly-once/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/swarmproof/exactly-once/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/swarmproof/exactly-once/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/swarmproof/exactly-once/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/swarmproof/exactly-once/releases/tag/v0.1.0
