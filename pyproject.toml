@@ -91,3 +91,13 @@ ignore = ["RUF022"]
 [tool.coverage.run]
 branch = true
 source = ["exactly_once"]
+# The coverage gate measures the deterministic core, which runs on every machine.
+# Environment-gated modules (Redis/Postgres need Docker, onchain needs Foundry,
+# integrations need the frameworks) are proven by their tests passing in the jobs
+# that have those deps — not by a coverage % that swings with runner conditions.
+omit = [
+    "*/stores/redis.py",
+    "*/stores/postgres.py",
+    "*/onchain.py",
+    "*/integrations/*",
+]
