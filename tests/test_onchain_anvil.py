@@ -15,8 +15,19 @@ import time
 
 import pytest
 
-from exactly_once import State, Store
+from exactly_once import QuarantinedError, State, Store
 from exactly_once.onchain import TxIntent, Web3ChainClient, onchain_key, onchain_once
+
+
+def _crash_next_commit(store: Store) -> None:
+    """Make the next commit raise once, simulating a kill after broadcast."""
+    orig = store.commit
+
+    def boom(k: str, r: bytes) -> None:
+        store.commit = orig  # type: ignore[method-assign]
+        raise RuntimeError("killed after broadcast, before commit")
+
+    store.commit = boom  # type: ignore[method-assign]
 
 pytestmark = pytest.mark.skipif(
     shutil.which("anvil") is None, reason="anvil (Foundry) not installed"
@@ -99,3 +110,43 @@ def test_e2e4_crash_mid_broadcast_resumes_without_double_submit(w3) -> None:
     assert chain.status(tx_hash) == "mined"
     assert chain.latest_nonce() == 1  # STILL one tx from the sender
     assert w3.eth.get_balance(_DEST) - start_balance == 10**18  # recipient credited once
+
+
+def test_e2e4_pending_tx_quarantines(w3) -> None:
+    """With mining paused, the broadcast tx stays pending — a resume must refuse to
+    guess and quarantine, never re-send."""
+    w3.provider.make_request("anvil_setAutomine", [False])
+    chain = Web3ChainClient(w3, _PK)
+    store = Store.memory()
+    charge = onchain_once(store, chain, nonce=0)(_intent)
+
+    _crash_next_commit(store)
+    with pytest.raises(RuntimeError):
+        charge()  # broadcast to mempool, then "crash"
+
+    key = onchain_key(chain.chain_id, chain.address, 0, _intent().data)
+    assert store.get(key).state is State.IN_FLIGHT
+    with pytest.raises(QuarantinedError):
+        charge()  # tx still pending on-chain -> indeterminate -> quarantine
+
+
+def test_e2e4_dropped_tx_resigns_same_nonce(w3) -> None:
+    """A broadcast that never mines and is dropped from the mempool must be re-signed
+    at the SAME nonce on resume — not abandoned, not sent at a new nonce."""
+    w3.provider.make_request("anvil_setAutomine", [False])
+    chain = Web3ChainClient(w3, _PK)
+    store = Store.memory()
+    charge = onchain_once(store, chain, nonce=0)(_intent)
+
+    _crash_next_commit(store)
+    with pytest.raises(RuntimeError):
+        charge()
+
+    dropped_hash, _ = chain.sign(_intent(), 0)
+    w3.provider.make_request("anvil_dropTransaction", [dropped_hash])
+    w3.provider.make_request("anvil_setAutomine", [True])  # the resend can now mine
+
+    tx_hash = charge()  # nonce free + tx unknown -> NOT_COMMITTED -> re-sign same nonce
+    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=15)
+    assert tx_hash == dropped_hash  # deterministic re-sign at nonce 0, not nonce+1
+    assert chain.latest_nonce() == 1  # exactly one tx mined
