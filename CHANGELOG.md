@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — reach
+
 ### Added
 - **Framework helpers** (`exactly_once.integrations`, `[langgraph]` / `[crewai]`
   extras) — `once_node` guards a LangGraph node (default key: run `thread_id` + node
@@ -62,5 +64,6 @@ single-reconciler scope of `check_then_decide` / `auto_retry` — is in
 Onchain adapter (dedupe by nonce + calldata-hash), TypeScript port, LangGraph/CrewAI
 helpers, lease/heartbeat-based reconciliation for the concurrent-reconciler case.
 
-[Unreleased]: https://github.com/swarmproof/exactly-once/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/swarmproof/exactly-once/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/swarmproof/exactly-once/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/swarmproof/exactly-once/releases/tag/v0.1.0
