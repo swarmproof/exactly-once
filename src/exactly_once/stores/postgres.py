@@ -75,6 +75,12 @@ _HEARTBEAT_SQL = (
     "WHERE key = %s AND state = 'in_flight' AND token = %s;"
 )
 _NOW_SQL = "SELECT extract(epoch from now());"
+# CREATE TABLE IF NOT EXISTS won't touch a table from an older version — add columns
+# introduced later (token: v0.1.0; lease_expires_at: v0.2.0). Idempotent.
+_MIGRATE_SQL = (
+    "ALTER TABLE effects ADD COLUMN IF NOT EXISTS token text;",
+    "ALTER TABLE effects ADD COLUMN IF NOT EXISTS lease_expires_at double precision;",
+)
 _LEDGER_COLS = "key, state, result, fingerprint, created_at, updated_at, token, lease_expires_at"
 
 
@@ -99,6 +105,8 @@ class PostgresStore(Store):
         self._conn.isolation_level = self._isolation
         with self._conn.cursor() as cur:
             cur.execute(_SCHEMA)
+            for stmt in _MIGRATE_SQL:
+                cur.execute(stmt)
         self._aconn: Any = None
         self._alock: asyncio.Lock | None = None
 
